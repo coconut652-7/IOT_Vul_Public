@@ -2,7 +2,7 @@
 
 ## Vulnerability Summary
 
-- Report date: 2026-04-29
+- Report date: 2026-05-08
 - Reporter: coconut652-7
 - CVE ID: TBD
 - Vendor: GL.iNet
