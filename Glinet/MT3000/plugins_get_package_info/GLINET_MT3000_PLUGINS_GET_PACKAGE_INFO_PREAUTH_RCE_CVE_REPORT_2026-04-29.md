@@ -1,7 +1,7 @@
 # GL.iNet MT3000 `plugins.get_package_info` Pre-Auth Command Injection to Root RCE
 
 - Report date: 2026-04-29
-- Reporter: Codex
+- Reporter: coconut652-7
 - CVE ID: TBD
 - Vendor: GL.iNet
 - Product: GL.iNet MT3000 / GL-MT3000
