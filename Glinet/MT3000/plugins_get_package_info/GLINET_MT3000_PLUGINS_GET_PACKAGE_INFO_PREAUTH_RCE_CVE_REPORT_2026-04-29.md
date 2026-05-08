@@ -180,7 +180,7 @@ tmp
 usr
 www
 ```
-![alt text](image-1.png)
+![alt text](./imag/image-1.png)
 
 This confirms attacker-controlled shell execution and write access to the web root without using a reverse shell or interactive callback.
 
