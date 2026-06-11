@@ -5,8 +5,8 @@
 - 分类：CNVD
 - 产品：H3C NX15 路由器
 - 影响版本：NX15V100R017 / R017
-- 主报告：`report/08_setsyncpppoecfg_runtime_analysis.md`
-- PoC：`poc/08_preauth_wizard_pppoe_credential_recovery.sh`
+- 主报告：`report/setsyncpppoecfg_runtime_analysis.md`
+- PoC：`poc/preauth_wizard_pppoe_credential_recovery.sh`
 
 ## 分类说明
 
