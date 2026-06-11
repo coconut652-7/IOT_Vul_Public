@@ -5,8 +5,8 @@
 - 分类：CNVD
 - 产品：H3C NX15 路由器
 - 影响版本：NX15V100R017 / R017
-- 主报告：`report/17_postauth_esps_macfilter_getlist_rce_report.md`
-- PoC：`poc/15_postauth_esps_macfilter_getlist_rce.py`
+- 主报告：`report/postauth_esps_macfilter_getlist_rce_report.md`
+- PoC：`poc/postauth_esps_macfilter_getlist_rce.py`
 
 ## 分类说明
 
