@@ -120,6 +120,8 @@ Content-Type: application/json
 {}
 ```
 
+![alt text](imag/image-4.png)
+
 2. Send the unauthenticated write request:
 
 ```http
@@ -138,9 +140,9 @@ Content-Type: application/json
   "mtu": 1500
 }
 ```
-
+![alt text](imag/image-10.png)
 3. Read back the WAN state again through `POST /api/wizard/getNetworkConf` or, if desired, through authenticated `esps.wan.get`.
-
+![alt text](imag/image-11.png)
 Expected result:
 
 - The request succeeds without an `AUTHENTICATION` header.
@@ -162,7 +164,7 @@ Connection: close
 
 {}
 ```
-
+![alt text](imag/image-6.png)
 2. Send the unauthenticated write request:
 
 ```http
@@ -175,9 +177,9 @@ Connection: close
 
 {"intf":"WAN1","workMode":"disabled"}
 ```
-
+![alt text](imag/image-7.png)
 3. Send the baseline read request again and confirm that `data.workMode` changed to `disabled`.
-
+![alt text](imag/image-8.png)
 4. Restore the WAN mode after verification:
 
 ```http
@@ -190,7 +192,7 @@ Connection: close
 
 {"intf":"WAN1","workMode":"dhcp"}
 ```
-
+![alt text](imag/image-9.png)
 Optional Burp requests may also set static IP, DNS, and PPPoE credential fields to demonstrate that the endpoint can change more than only the `workMode` field.
 
 ## Evidence
