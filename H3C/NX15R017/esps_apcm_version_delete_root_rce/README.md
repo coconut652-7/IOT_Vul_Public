@@ -12,4 +12,4 @@
 
 ## Classification
 
-This issue is classified as CVE because it is an authenticated command injection in one version-list parameter path.
+This issue is classified as CVE because it is an authenticated command injection.

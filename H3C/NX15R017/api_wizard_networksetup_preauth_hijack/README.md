@@ -14,4 +14,4 @@
 
 ## Classification
 
-This issue is classified as CVE because it is a direct unauthenticated configuration-write flaw exposed by a single wizard endpoint.
+This issue is classified as CVE because it is a direct unauthenticated configuration-write flaw exposed by wizard endpoint.
