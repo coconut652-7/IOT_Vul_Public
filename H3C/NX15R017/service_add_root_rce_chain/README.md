@@ -7,7 +7,6 @@
 - Product: H3C NX15 Router
 - Affected firmware: NX15V100R017 / R017
 - Main report: `report/postauth_service_add_rce_report.md`
-- Analysis guidance: `report/postauth_service_add_rce_analysis_guidance.md`
 - PoC: `poc/postauth_service_add_rce.py`
 
 ## Classification

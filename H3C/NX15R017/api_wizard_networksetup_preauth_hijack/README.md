@@ -7,7 +7,6 @@
 - Product: H3C NX15 Router
 - Affected firmware: NX15V100R017 / R017
 - Main report: `report/preauth_wizard_networksetup_report.md`
-- Analysis guidance: `report/preauth_wizard_networksetup_analysis_guidance.md`
 - PoCs:
   - `poc/preauth_wizard_networksetup_hijack.py`
   - `poc/preauth_wizard_networksetup_toggle.py`
