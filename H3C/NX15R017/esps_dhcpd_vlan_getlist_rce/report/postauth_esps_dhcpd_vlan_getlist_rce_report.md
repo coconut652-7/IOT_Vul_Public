@@ -1,41 +1,41 @@
-# NX15 R017 `esps.dhcpd.vlan.getlist` 后置独立 root RCE
+# NX15 R017 `esps.dhcpd.vlan.getlist` Post-Authentication Independent root RCE
 
-## 1. 结论
+## 1. Conclusion
 
-在 NX15 R017 上，`/api/esps` 的：
+On NX15 R017, the following `/api/esps` handler:
 
 - `object = esps.dhcpd.vlan`
 - `method = getlist`
 
-存在一条**新的、独立的、即时触发型后认证 root RCE**。
+contains a **new, independent, immediate-trigger post-authentication root RCE**.
 
-- **接口**：`POST /api/esps`
-- **对象**：`esps.dhcpd.vlan`
-- **方法**：`getlist`
-- **注入点**：`param.list[]` 中的 VLAN 名称字符串
-- **权限**：后认证（管理员会话）
-- **结果**：以 **root** 权限执行任意命令
-- **验证设备**：`192.168.8.1`，NX15 firmware `R017`
-- **结论等级**：**Confirmed / Exploited**
+- **Endpoint**: `POST /api/esps`
+- **Object**: `esps.dhcpd.vlan`
+- **Method**: `getlist`
+- **Injection point**: VLAN name strings in `param.list[]`
+- **Privilege requirement**: post-authentication administrator session
+- **Impact**: arbitrary command execution as **root**
+- **Verified device**: `192.168.8.1`, NX15 firmware `R017`
+- **Status**: **Confirmed / Exploited**
 
-本轮已实机确认：
+This round of testing confirmed on a physical device that:
 
-1. 不需要单引号绕过，也不需要 JSON Unicode `'` 技巧；
-2. 仅靠普通字符串里的 **`$()` 命令替换** 就可以直接打穿；
-3. 即使接口最后返回 `DHCP:Unknown VLAN` / `code=3083`，攻击者命令也已经执行；
-4. 一次 `esps.dhcpd.vlan.getlist` 调用即可拉起 root shell。
+1. No single-quote bypass and no JSON Unicode `\u0027` technique is required.
+2. Ordinary **`$()` command substitution** inside a normal string is sufficient to break through directly.
+3. Even if the API ultimately returns `DHCP:Unknown VLAN` / `code=3083`, the attacker's command has already executed.
+4. A single `esps.dhcpd.vlan.getlist` call is sufficient to spawn a root shell.
 
 ---
 
-## 2. 根因分析
+## 2. Root Cause Analysis
 
-目标脚本：
+Target script:
 
 - `/usr/libexec/rpcd/esps.dhcpd.vlan`
 
-### 2.1 `getlist` 直接读取攻击者控制的 `list[]`
+### 2.1 `getlist` directly reads attacker-controlled `list[]`
 
-在 `getlist)` 通用分支中：
+In the generic `getlist)` branch:
 
 ```sh
 json_load "$param"
@@ -51,31 +51,31 @@ if json_is_a list array; then
         ...
 ```
 
-这里的 `vlan_name` 来自用户的 `param.list[]`，没有经过危险字符过滤。
+Here, `vlan_name` comes from the user-controlled `param.list[]` and is not filtered for dangerous characters.
 
-### 2.2 真正的危险 sink
+### 2.2 Actual dangerous sink
 
-核心危险语句是：
+The core dangerous statement is:
 
 ```sh
 eval vlan_name_list${idx}="$vlan_name"
 ```
 
-因为这里使用了 `eval`，shell 会对拼接后的字符串再次解析。
+Because `eval` is used here, the shell parses the concatenated string again.
 
-如果 `vlan_name` 为：
+If `vlan_name` is:
 
 ```text
 VLAN1$(payload)
 ```
 
-则 `payload` 会在 `eval` 阶段被立即执行。
+then `payload` is executed immediately during the `eval` stage.
 
-也就是说，这里不是“配置写入后再二次触发”的链，而是 **wrapper 自己立即执行** 的链。
+In other words, this is not a chain that requires configuration to be written first and then triggered later; it is a chain where **the wrapper itself executes immediately**.
 
-### 2.3 业务校验发生在命令执行之后
+### 2.3 Business validation happens after command execution
 
-危险 `eval` 之后，脚本才继续做 VLAN 存在性检查：
+After the dangerous `eval`, the script then performs the VLAN existence check:
 
 ```sh
 vlan_id=$(printf '%s' "$vlan_name" | tr -d "VLAN")
@@ -87,33 +87,33 @@ if [ -z "$check" ];then
 fi
 ```
 
-因此，即使攻击字符串导致后续 `vlan_id` 变成一个不存在的名字，接口最后只会返回：
+Therefore, even if the attack string causes the later `vlan_id` to become a nonexistent name, the API will only return:
 
 ```json
 {"code":3083,"message":"DHCP:Unknown VLAN"}
 ```
 
-但这时攻击者命令已经被执行完毕。
+At that point, however, the attacker's command has already finished executing.
 
-### 2.4 这是 wrapper-level RCE，而不是后续业务逻辑 RCE
+### 2.4 This is wrapper-level RCE, not RCE in later business logic
 
-这条链最关键的点在于：
+The key points of this chain are:
 
-1. 攻击命令在 `eval vlan_name_list...` 就已经执行；
-2. 后续 VLAN 存在性检查只是改变 HTTP 返回值；
-3. 即使业务失败，RCE 仍然成功。
+1. The attacker command is already executed at `eval vlan_name_list...`.
+2. The later VLAN existence check only changes the HTTP response value.
+3. Even when the business operation fails, the RCE still succeeds.
 
-因此它属于：
+Therefore, this should be classified as:
 
-> **`esps.dhcpd.vlan.getlist` 自身的 wrapper-level 命令注入**
+> **wrapper-level command injection in `esps.dhcpd.vlan.getlist` itself**
 
-而不是某种“VLAN 真实存在后才触发”的业务型漏洞。
+rather than a business-logic vulnerability that requires the VLAN to actually exist before triggering.
 
 ---
 
-## 3. 关键静态证据
+## 3. Key Static Evidence
 
-### 3.1 用户可控 `list[]`
+### 3.1 User-controllable `list[]`
 
 ```sh
 if json_is_a list array; then
@@ -124,13 +124,13 @@ if json_is_a list array; then
         json_get_var vlan_name ${idx}
 ```
 
-### 3.2 直接 `eval` 用户输入
+### 3.2 Direct `eval` of user input
 
 ```sh
 eval vlan_name_list${idx}="$vlan_name"
 ```
 
-### 3.3 校验在 sink 之后
+### 3.3 Validation occurs after the sink
 
 ```sh
 vlan_id=$(printf '%s' "$vlan_name" | tr -d "VLAN")
@@ -142,29 +142,29 @@ if [ -z "$check" ];then
 fi
 ```
 
-### 3.4 同文件内还存在二次 `eval` 读取
+### 3.4 A secondary `eval` read also exists in the same file
 
-后续输出阶段还有：
+The later output stage also contains:
 
 ```sh
 json_add_string "intf" "$(eval echo '$'vlan_name_list"${i}")"
 ```
 
-这说明该路径整体都不安全；不过本次实机验证中，**第一个 `eval vlan_name_list...` 已足够打通 RCE**。
+This shows that the overall path is unsafe. However, in this physical-device verification, **the first `eval vlan_name_list...` alone was already sufficient to achieve RCE**.
 
 ---
 
-## 4. 利用方式
+## 4. Exploitation Method
 
-### 4.1 不需要原始单引号，也不需要原始 raw-body 绕过
+### 4.1 No raw single quote or raw-body bypass is required
 
-这条链不需要：
+This chain does not require:
 
-- 原始单引号 `'`
-- `\u0027` 绕过
-- 手工构造复杂 raw JSON
+- A raw literal single quote `'`.
+- A `\u0027` bypass.
+- Manually constructing a complex raw JSON body.
 
-普通 JSON 请求中直接放入命令替换即可：
+Command substitution can be placed directly into an ordinary JSON request:
 
 ```json
 [
@@ -181,36 +181,36 @@ json_add_string "intf" "$(eval echo '$'vlan_name_list"${i}")"
 ]
 ```
 
-### 4.2 预期 API 表象
+### 4.2 Expected API appearance
 
-接口通常会返回业务错误，例如：
+The API usually returns a business error, for example:
 
 ```json
 [{"id":1,"result":{"message":"DHCP:Unknown VLAN","data":[],"code":3083}}]
 ```
 
-这是因为 payload 污染了 VLAN 名称，导致后续存在性检查失败。
+This happens because the payload pollutes the VLAN name, causing the later existence check to fail.
 
-但这**不代表利用失败**；相反，这恰恰证明：
+However, this **does not mean exploitation failed**. On the contrary, it proves that:
 
-- RCE 发生在业务错误返回之前；
-- 返回码不能作为漏洞利用失败的判断依据。
+- RCE occurs before the business-error response is returned.
+- The response code cannot be used to determine whether exploitation failed.
 
 ---
 
-## 5. 动态验证
+## 5. Dynamic Verification
 
-### 5.1 登录
+### 5.1 Login
 
-使用管理员凭据：
+Use administrator credentials:
 
 - `admin / admin123`
 
-登录 `http://192.168.8.1/api/login/auth` 获取会话。
+Log in to `http://192.168.8.1/api/login/auth` to obtain a session.
 
-### 5.2 触发请求
+### 5.2 Trigger request
 
-发送：
+Send:
 
 ```json
 [
@@ -227,15 +227,15 @@ json_add_string "intf" "$(eval echo '$'vlan_name_list"${i}")"
 ]
 ```
 
-接口返回：
+API response:
 
 ```json
 [{"id":1,"result":{"message":"DHCP:Unknown VLAN","data":[],"code":3083}}]
 ```
 
-### 5.3 Shell 验证
+### 5.3 Shell verification
 
-随后连接 `192.168.8.1:2480`，得到：
+Then connecting to `192.168.8.1:2480` produced:
 
 ```text
 BusyBox v1.30.1 (2025-08-01 14:05:52 CST) built-in shell (ash)
@@ -244,90 +244,90 @@ uid=0(root) gid=0(root)
 DHCPD_VLAN_GETLIST_RCE_OK
 ```
 
-这证明：
+This proves that:
 
-- 攻击命令已被执行；
-- 执行上下文为 **root**。
+- The attack command was executed.
+- The execution context was **root**.
 
-### 5.4 清理
+### 5.4 Cleanup
 
-验证后已执行：
+After verification, the following cleanup was performed:
 
-- 杀死 `telnetd -p 2480`
-- 删除 `/tmp/dhcpd_vlan_getlist_rce_marker`
+- Killed `telnetd -p 2480`.
+- Deleted `/tmp/dhcpd_vlan_getlist_rce_marker`.
 
-并确认端口已关闭。
+The port was then confirmed closed.
 
 ---
 
 ## 6. POC
 
-已落地 POC：
+Implemented POC:
 
 - `poc/postauth_esps_dhcpd_vlan_getlist_rce.py`
 
-示例：
+Example:
 
 ```bash
 python3 poc/postauth_esps_dhcpd_vlan_getlist_rce.py --cleanup --port 2481
 ```
 
-该脚本会：
+This script:
 
-1. 登录后台；
-2. 调用 `esps.dhcpd.vlan.getlist`；
-3. 注入 `VLAN1$(...)` payload；
-4. 等待临时 telnet shell；
-5. 验证 `id` 与 marker；
-6. 在 `--cleanup` 下自动清理。
-
----
-
-## 7. 影响评估
-
-### 7.1 安全影响
-
-攻击者在获得后台管理员会话后，可：
-
-- 直接以 root 执行任意命令；
-- 持久化后门；
-- 修改网络与防火墙配置；
-- 导出或破坏敏感配置；
-- 接管整台路由器。
-
-### 7.2 漏洞特点
-
-这条链的危险程度较高，原因在于：
-
-1. **单请求即触发**
-2. **不依赖单引号绕过**
-3. **即使 API 返回错误仍然成功执行**
-4. **根因位于 wrapper 本身**
-
-这使利用过程更直接，也更稳定。
+1. Logs in to the admin interface.
+2. Calls `esps.dhcpd.vlan.getlist`.
+3. Injects a `VLAN1$(...)` payload.
+4. Waits for the temporary telnet shell.
+5. Verifies `id` and the marker.
+6. Automatically cleans up when `--cleanup` is specified.
 
 ---
 
-## 8. 最终结论
+## 7. Impact Assessment
 
-`esps.dhcpd.vlan.getlist` 提供了一条新的**独立后认证 root RCE**。
+### 7.1 Security impact
 
-根因是：
+After obtaining a backend administrator session, an attacker can:
+
+- Execute arbitrary commands directly as root.
+- Persist a backdoor.
+- Modify network and firewall configuration.
+- Export or destroy sensitive configuration.
+- Take over the entire router.
+
+### 7.2 Vulnerability characteristics
+
+This chain is highly dangerous because:
+
+1. **It triggers in a single request.**
+2. **It does not rely on a single-quote bypass.**
+3. **It still executes successfully even when the API returns an error.**
+4. **The root cause is in the wrapper itself.**
+
+This makes exploitation more direct and more stable.
+
+---
+
+## 8. Final Conclusion
+
+`esps.dhcpd.vlan.getlist` provides a new **independent post-authentication root RCE**.
+
+The root cause is:
 
 ```sh
 eval vlan_name_list${idx}="$vlan_name"
 ```
 
-对用户可控 `list[]` 项进行了直接 `eval`。攻击者只需把 VLAN 名称写成：
+which directly applies `eval` to user-controlled `list[]` entries. An attacker only needs to write the VLAN name as:
 
 ```text
 VLAN1$(payload)
 ```
 
-即可在业务校验发生之前触发 root 命令执行。
+to trigger root command execution before business validation occurs.
 
-更关键的是：
+Most importantly:
 
-> **即使接口最终返回 `DHCP:Unknown VLAN`，攻击者命令仍然已经执行成功。**
+> **Even if the API ultimately returns `DHCP:Unknown VLAN`, the attacker's command has already executed successfully.**
 
-因此这是一条确认完成、可稳定复现的 **wrapper-level post-auth root RCE**。
+Therefore, this is a confirmed, reliably reproducible **wrapper-level post-authentication root RCE**.

